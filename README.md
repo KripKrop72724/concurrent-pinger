@@ -8,7 +8,6 @@ This project is an asynchronous ping utility written in Python. It utilizes the 
 - [Usage](#usage)
 - [Files](#files)
 - [Event Loop Policy on Windows](#event-loop-policy-on-windows)
-- [License](#license)
 
 ## Installation
 
