@@ -35,7 +35,7 @@ This project is an asynchronous ping utility written in Python. It utilizes the 
 
 1. **Prepare the hosts file:**
 
-    Create a file named `hosts.txt` in the project directory with the list of hosts to ping. For example:
+    Create a file named `hosts.txt` in the project directory with the list of hosts that you want to ping. For example:
 
     ```
     google.com
