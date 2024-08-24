@@ -41,7 +41,6 @@ This project is an asynchronous ping utility written in Python. It utilizes the 
     google.com
     github.com
     stackoverflow.com
-    python.org
     facebook.com
     ```
 
