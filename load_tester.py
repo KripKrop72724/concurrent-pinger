@@ -1,14 +1,13 @@
 import gevent
-from gevent import monkey
-
-monkey.patch_all()  # Patches standard library to cooperate with gevent
-
 import requests
 import time
 import logging
 from gevent.pool import Pool
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+from gevent import monkey
+
+monkey.patch_all()  # Patches standard library to cooperate with gevent
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
