@@ -1,157 +1,161 @@
-import gevent
-import requests
+import aiohttp
+import asyncio
 import time
-import logging
-from gevent.pool import Pool
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
-from gevent import monkey
 
-monkey.patch_all()  # Patches standard library to cooperate with gevent
+# Global tracking variables
+total_requests = 0
+total_failures = 0
+start_time = time.time()
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
+# Intelligent dynamic adjustment variables
+max_ramp_up_rate = 100  # Max number of users to add at a time
+min_ramp_up_rate = 5  # Start ramp-up at a higher rate
+adjustment_factor = 1.5  # More aggressive factor to scale ramp-up based on performance
+ramp_up_rate = min_ramp_up_rate  # Initial rate of ramping up
+error_rate_threshold = None  # Error rate threshold will be set dynamically
+response_time_threshold = None  # Response time threshold will be set dynamically
 
-# Suppress urllib3 warnings
-logging.getLogger("urllib3").setLevel(logging.ERROR)
+# Fine-tuning variables
+fine_tuning = False
+last_good_user_count = 0
+fine_tuning_attempts = 3  # Fine-tuning verification attempts
+final_user_limit = 0
 
-# Timeout for each request in seconds
-REQUEST_TIMEOUT = 30  # Adjusted timeout
-
-# Latency threshold in seconds
-LATENCY_THRESHOLD = 5.0  # Adjusted latency threshold
-
-# Number of retries for failed requests
-MAX_RETRIES = 3
-
-# Setup session with connection pooling and retry logic
-session = requests.Session()
-retry_strategy = Retry(
-    total=MAX_RETRIES,
-    backoff_factor=1,
-    status_forcelist=[429, 500, 502, 503, 504],
-)
-adapter = HTTPAdapter(max_retries=retry_strategy, pool_connections=100, pool_maxsize=100)
-session.mount("http://", adapter)
-session.mount("https://", adapter)
+# URL to test
+url_to_test = "https://example.com/"
 
 
-# Function to send a single HTTP GET request with retries
-def ping(url):
+# Function to simulate concurrent requests using aiohttp
+async def make_request(session):
+    global total_requests, total_failures
     try:
-        start_time = time.time()
-        response = session.get(url, timeout=REQUEST_TIMEOUT)
-        end_time = time.time()
-        latency = end_time - start_time
-        if response.status_code == 200:
-            return True, latency
-        else:
-            return False, latency
-    except requests.RequestException as e:
-        logger.debug(f"Request failed: {e}")
-        return False, 0
+        start_request_time = time.time()
+        async with session.get(url_to_test) as response:
+            total_requests += 1
+            if response.status != 200:
+                total_failures += 1
+                return time.time() - start_request_time
+            return time.time() - start_request_time
+    except Exception as e:
+        total_failures += 1
+        return float('inf')  # Return a high response time for failed requests
 
 
-# Function to send multiple requests concurrently
-def worker(url, num_requests, results):
-    for _ in range(num_requests):
-        result = ping(url)
-        results.append(result)
+# Function to run the test
+async def run_load_test(concurrent_users):
+    async with aiohttp.ClientSession() as session:
+        tasks = []
+        for _ in range(concurrent_users):
+            tasks.append(make_request(session))
+        response_times = await asyncio.gather(*tasks)
+    return response_times
 
 
-# Main function to orchestrate load testing
-def load_test(url, initial_requests):
-    def perform_test(concurrent_requests):
-        pool = Pool(min(concurrent_requests, 100))  # Limit the pool size to prevent overloading
-        results = []
+# Function to monitor and adjust the load dynamically, with fine-tuning
+async def intelligent_adjustment():
+    global ramp_up_rate, total_requests, total_failures, start_time
+    global error_rate_threshold, response_time_threshold, fine_tuning, last_good_user_count
+    global final_user_limit, fine_tuning_attempts
 
-        for _ in range(concurrent_requests):
-            pool.spawn(worker, url, 1, results)
-
-        pool.join(timeout=REQUEST_TIMEOUT * 2)  # Add timeout to prevent hanging
-
-        success_count = 0
-        total_latency = 0
-        for success, latency in results:
-            if success:
-                success_count += 1
-                total_latency += latency
-
-        total_requests = concurrent_requests
-        avg_latency = total_latency / success_count if success_count else float('inf')
-        return success_count, avg_latency
-
-    low = 1
-    high = initial_requests
-    best = 0
-    best_latency = float('inf')
-    best_success_count = 0
-
-    # Improved Load Adjustment Logic
-    while low <= high:
-        mid = (low + high) // 2
-        logger.info(f"Testing with {mid} concurrent requests")
-        success_count, avg_latency = perform_test(mid)
-        success_rate = success_count / mid
-        score = success_rate * (LATENCY_THRESHOLD / (avg_latency if avg_latency else 1))
-        if success_rate > 0.9 and avg_latency <= LATENCY_THRESHOLD:
-            best = mid
-            best_latency = avg_latency
-            best_success_count = success_count
-            low = mid + 1  # Increase load for next test
-        else:
-            high = mid - 1  # Decrease load for next test
-        logger.info(
-            f"Concurrent Requests: {mid}, Successes: {success_count}, Average Latency: {avg_latency:.4f} seconds, Score: {score:.4f}")
-
-    # Fine-tune the best value found
-    for current_requests in range(best - 5, best + 6):
-        if current_requests > 0:
-            logger.info(f"Fine-tuning with {current_requests} concurrent requests")
-            success_count, avg_latency = perform_test(current_requests)
-            success_rate = success_count / current_requests
-            score = success_rate * (LATENCY_THRESHOLD / (avg_latency if avg_latency else 1))
-            if success_rate > 0.9 and avg_latency <= LATENCY_THRESHOLD:
-                best = current_requests
-                best_latency = avg_latency
-                best_success_count = success_count
-            logger.info(
-                f"Concurrent Requests: {current_requests}, Successes: {success_count}, Average Latency: {avg_latency:.4f} seconds, Score: {score:.4f}")
-
-    logger.info(f"Initial Maximum concurrent requests the website can handle: {best}")
-    logger.info(
-        f"Initial Best Success Count: {best_success_count}, Initial Best Average Latency: {best_latency:.4f} seconds")
-
-    # Exploratory phase to ensure the maximum capacity
-    final_max = best
-    step = 500  # Start with a larger step
-    current_requests = best + step
-    previous_latency = best_latency
-    multiplier = 1.5  # Exponential step size increase factor
+    current_users = 28  # Start with 28 users to speed up initial testing
+    last_good_user_count = current_users
 
     while True:
-        logger.info(f"Exploratory phase with {current_requests} concurrent requests")
-        success_count, avg_latency = perform_test(current_requests)
-        success_rate = success_count / current_requests
-        if success_rate > 0.9 and avg_latency <= LATENCY_THRESHOLD:
-            final_max = current_requests
-            if avg_latency < previous_latency * 1.2:  # Increase step if latency increase is within 20%
-                step = int(step * multiplier)
-            else:  # Decrease step if latency increases significantly
-                step = max(step // 2, 100)
-            previous_latency = avg_latency
-            current_requests += step
+        # Simulate concurrent requests for current_users
+        print(f"Testing with {current_users} users...")
+        response_times = await run_load_test(current_users)
+
+        # Calculate statistics
+        elapsed_time = time.time() - start_time
+        avg_response_time = sum(response_times) / len(response_times) if response_times else 1
+        error_rate = total_failures / total_requests if total_requests > 0 else 0
+        requests_per_second = total_requests / elapsed_time
+
+        # Dynamically set error rate and response time thresholds
+        if error_rate_threshold is None:
+            error_rate_threshold = 0.05  # Set to 5% initially
+        if response_time_threshold is None:
+            response_time_threshold = avg_response_time * 1.5  # Set to 1.5x initial response time
+
+        # Print current stats
+        print(f"Users: {current_users}, Avg Response Time: {avg_response_time:.2f} ms, "
+              f"Error Rate: {error_rate:.2%}, Requests/sec: {requests_per_second:.2f}")
+
+        # Check if the server is breaking under load
+        if avg_response_time > response_time_threshold or error_rate > error_rate_threshold:
+            print(f"Performance degradation detected at {current_users} users.")
+
+            if not fine_tuning:
+                # Enter fine-tuning mode
+                fine_tuning = True
+                # Set the last successful user count and decrease user load for fine-tuning
+                current_users = (last_good_user_count + current_users) // 2
+                continue
+            else:
+                # If already fine-tuning and another failure occurs, finalize the user count
+                print(f"Fine-tuning complete. Maximum stable user count is {last_good_user_count} users.")
+                final_user_limit = last_good_user_count
+                break  # Break out of the main loop for further verification attempts
+
         else:
+            # If performance is good, store the last good user count
+            last_good_user_count = current_users
+
+        # Adjust ramp-up rate dynamically
+        if avg_response_time < response_time_threshold * 0.7 and error_rate < error_rate_threshold * 0.5:
+            # Server is performing well, ramp up aggressively
+            ramp_up_rate = min(int(ramp_up_rate * (1 + adjustment_factor)), max_ramp_up_rate)
+        else:
+            # Server is struggling, slow down ramp-up
+            ramp_up_rate = max(int(ramp_up_rate * (1 - adjustment_factor)), min_ramp_up_rate)
+
+        # Ensure ramp-up rate does not get stuck too low
+        ramp_up_rate = max(ramp_up_rate, min_ramp_up_rate)
+
+        # Increase concurrent users based on ramp-up rate
+        current_users += ramp_up_rate
+
+        # Ensure we do not exceed too high a number of concurrent users
+        if current_users > 1000:  # You can change this limit based on your use case
+            print(f"Max users reached without failure. Test completed at {current_users} users.")
             break
-        logger.info(
-            f"Concurrent Requests: {current_requests}, Successes: {success_count}, Average Latency: {avg_latency:.4f} seconds")
 
-    logger.info(f"Final Maximum concurrent requests the website can handle: {final_max}")
+        # Sleep for a shorter period before next batch to make the ramp-up faster
+        await asyncio.sleep(2)
 
 
-if __name__ == '__main__':
-    # main function for quick testing of functionality
-    url = 'https://hogar.aiems.ae'  # Replace with the target URL
-    initial_requests = 500  # Start with a larger number of concurrent requests
-    load_test(url, initial_requests)
+# Function to verify the fine-tuned value
+async def verify_max_users():
+    global final_user_limit, fine_tuning_attempts
+
+    for attempt in range(fine_tuning_attempts):
+        print(f"\nVerification Attempt {attempt + 1}: Testing with {final_user_limit} users...")
+        response_times = await run_load_test(final_user_limit)
+
+        # Calculate statistics
+        elapsed_time = time.time() - start_time
+        avg_response_time = sum(response_times) / len(response_times) if response_times else 1
+        error_rate = total_failures / total_requests if total_requests > 0 else 0
+
+        print(f"Users: {final_user_limit}, Avg Response Time: {avg_response_time:.2f} ms, "
+              f"Error Rate: {error_rate:.2%}")
+
+        if avg_response_time > response_time_threshold or error_rate > error_rate_threshold:
+            print(f"Performance degradation detected during verification. Final stable user count may be lower.")
+            final_user_limit = final_user_limit - 1  # Adjust downwards slightly if needed
+
+
+# Main function to start the test
+async def main():
+    await intelligent_adjustment()
+
+    if final_user_limit > 0:
+        # After fine-tuning, verify the final user limit with multiple attempts
+        await verify_max_users()
+
+        print(f"\nFinal validated user count: {final_user_limit}")
+
+
+# Run the main function with asyncio.run() to handle the event loop correctly
+if __name__ == "__main__":
+    asyncio.run(main())  # This ensures proper event loop management
